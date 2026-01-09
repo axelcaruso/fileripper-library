@@ -5,73 +5,96 @@
 package pfte
 
 import (
-	"fmt"
 	"io"
 	"os"
-	"time"
 
 	"fileripper/internal/network"
 )
 
-// UploadFile sends a local file to the remote server.
-func UploadFile(session *network.SftpSession, localPath, remotePath string) error {
-	fmt.Printf(">> Transfer: Uploading %s -> %s\n", localPath, remotePath)
-	start := time.Now()
+// BufferSize is defined ONLY HERE to avoid redeclaration errors.
+// 64KB buffer for optimal TCP throughput.
+const BufferSize = 64 * 1024 
 
-	// 1. Open Local
-	src, err := os.Open(localPath)
-	if err != nil {
-		return err
-	}
-	defer src.Close()
-
-	// 2. Create Remote
-	dst, err := session.SftpClient.Create(remotePath)
-	if err != nil {
-		return err
-	}
-	defer dst.Close()
-
-	// 3. The Transfer (Stream bytes)
-	bytes, err := io.Copy(dst, src)
-	if err != nil {
-		return err
-	}
-
-	duration := time.Since(start)
-	fmt.Printf(">> Transfer: Done. Sent %d bytes in %v.\n", bytes, duration)
-	return nil
+// ProgressWriter is a wrapper to update the monitor as we write
+type ProgressWriter struct {
+	Writer io.Writer
+	OnWrite func(int64)
 }
 
-// DownloadFile pulls a remote file to the local disk.
-func DownloadFile(session *network.SftpSession, remotePath, localPath string) error {
-	fmt.Printf(">> Transfer: Downloading %s -> %s\n", remotePath, localPath)
-	start := time.Now()
+func (pw *ProgressWriter) Write(p []byte) (int, error) {
+	n, err := pw.Writer.Write(p)
+	if n > 0 {
+		pw.OnWrite(int64(n))
+	}
+	return n, err
+}
 
-	// 1. Open Remote
+// DownloadFileWithProgress pulls a remote file and updates GlobalMonitor
+func DownloadFileWithProgress(session *network.SftpSession, remotePath, localPath string) error {
 	src, err := session.SftpClient.Open(remotePath)
 	if err != nil {
 		return err
 	}
 	defer src.Close()
 
-	// 2. Create Local
 	dst, err := os.Create(localPath)
 	if err != nil {
 		return err
 	}
 	defer dst.Close()
 
-	// 3. The Transfer
-	bytes, err := io.Copy(dst, src)
+	buf := make([]byte, BufferSize)
+	
+	// Wrap the destination writer to intercept bytes
+	writer := &ProgressWriter{
+		Writer: dst,
+		OnWrite: func(n int64) {
+			GlobalMonitor.AddBytes(n)
+		},
+	}
+
+	_, err = io.CopyBuffer(writer, src, buf)
 	if err != nil {
 		return err
 	}
 
-	// Force write to disk to ensure checksum will be valid later
 	dst.Sync()
-
-	duration := time.Since(start)
-	fmt.Printf(">> Transfer: Done. Received %d bytes in %v.\n", bytes, duration)
 	return nil
+}
+
+// UploadFileWithProgress sends a local file and updates GlobalMonitor
+func UploadFileWithProgress(session *network.SftpSession, localPath, remotePath string) error {
+	src, err := os.Open(localPath)
+	if err != nil {
+		return err
+	}
+	defer src.Close()
+
+	dst, err := session.SftpClient.Create(remotePath)
+	if err != nil {
+		return err
+	}
+	defer dst.Close()
+
+	buf := make([]byte, BufferSize)
+
+	writer := &ProgressWriter{
+		Writer: dst,
+		OnWrite: func(n int64) {
+			GlobalMonitor.AddBytes(n)
+		},
+	}
+
+	_, err = io.CopyBuffer(writer, src, buf)
+	return err
+}
+
+// Legacy functions needed if referenced elsewhere, updated to use the single BufferSize
+func UploadFile(session *network.SftpSession, localPath, remotePath string) error {
+	// Simple wrapper around the progress version or standard copy
+	return UploadFileWithProgress(session, localPath, remotePath)
+}
+
+func DownloadFile(session *network.SftpSession, remotePath, localPath string) error {
+	return DownloadFileWithProgress(session, remotePath, localPath)
 }

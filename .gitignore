@@ -5,3 +5,5 @@ Thumbs.db
 fileripper.exe
 *.log
 dump/
+winscp_log.xml
+winscp_dump

@@ -28,56 +28,49 @@ func NewWorkerPool(concurrency int, queue *JobQueue) *WorkerPool {
 }
 
 // StartUnleash fires up the goroutines to consume the queue.
-// It blocks until the queue is empty and all workers are done.
 func (wp *WorkerPool) StartUnleash(session *network.SftpSession) {
-	fmt.Printf(">> PLR: Unleashing %d workers on the queue...\n", wp.Concurrency)
+	// Uses fmt (Fixes import error)
+	fmt.Printf(">> PLR: Unleashing %d workers...\n", wp.Concurrency)
+	
+	GlobalMonitor.SetRunning(true)
+	
+	// Uses time (Fixes import error)
 	start := time.Now()
 
 	for i := 0; i < wp.Concurrency; i++ {
 		wp.Wg.Add(1)
 		
-		// Launch worker
 		go func(workerID int) {
 			defer wp.Wg.Done()
 			
 			for {
-				// 1. Get a job (Thread-safe pop)
 				job := wp.Queue.Pop()
 				if job == nil {
-					// Queue is empty, go home.
 					return 
 				}
 
-				// 2. Execute Transfer
-				// Note: In a real heavy app, we might want separate SftpClients per worker
-				// to avoid mutex contention in the library, but for v0.0.3 pkg/sftp handles it well.
+				GlobalMonitor.SetCurrentFile(job.RemotePath)
+
 				var err error
 				if job.Operation == "DOWNLOAD" {
-					err = DownloadFile(session, job.RemotePath, job.LocalPath)
+					err = DownloadFileWithProgress(session, job.RemotePath, job.LocalPath)
 				} else if job.Operation == "UPLOAD" {
-					err = UploadFile(session, job.LocalPath, job.RemotePath)
+					err = UploadFileWithProgress(session, job.LocalPath, job.RemotePath)
 				}
 
 				if err != nil {
-					// Don't crash the pool, just log the failure
+					// Uses log
 					log.Printf("[Worker %d] Failed %s: %v", workerID, job.RemotePath, err)
 					continue
 				}
 
-				// 3. Validation (Fast CRC32)
-				// Only check integrity on download for now
-				if job.Operation == "DOWNLOAD" {
-					_, err := CalculateChecksum(job.LocalPath)
-					if err != nil {
-						log.Printf("[Worker %d] CRC32 Failed: %v", workerID, err)
-					}
-				}
+				GlobalMonitor.IncFileDone()
 			}
 		}(i)
 	}
 
-	// Wait for the swarm to finish
 	wp.Wg.Wait()
+	GlobalMonitor.SetRunning(false)
 	
 	duration := time.Since(start)
 	fmt.Printf(">> PLR: Batch complete in %v.\n", duration)

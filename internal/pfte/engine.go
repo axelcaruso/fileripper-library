@@ -36,40 +36,36 @@ func NewEngine() *Engine {
 	}
 }
 
-// StartTransfer executes the mass download logic.
 func (e *Engine) StartTransfer(session *network.SftpSession, downloadAll bool) error {
 	if session.SftpClient == nil {
 		return fmt.Errorf("sftp_client_not_initialized")
 	}
 
-	// 1. Determine Concurrency
 	concurrency := BatchSizeConservative
 	if e.Mode == ModeBoost {
 		concurrency = BatchSizeBoost
 	}
 	
 	if !downloadAll {
-		fmt.Println(">> PFTE: No operation specified. Use --all to download everything.")
 		return nil
 	}
 
-	// 2. Setup Local Dump Directory
 	localDir := "dump"
 	if _, err := os.Stat(localDir); os.IsNotExist(err) {
 		os.Mkdir(localDir, 0755)
 	}
 
-	// 3. Discovery Phase (Fill the Queue)
-	fmt.Println(">> PFTE: Scanning remote root for mass download...")
+	fmt.Println(">> PFTE: Scanning remote root...")
 	
 	files, err := session.SftpClient.ReadDir(".")
 	if err != nil {
 		return err
 	}
 
-	queuedCount := 0
+	queuedCount := int64(0)
+	totalBytes := int64(0)
+
 	for _, file := range files {
-		// Skip directories for v0.0.3 (recursion comes later)
 		if file.IsDir() {
 			continue
 		}
@@ -82,16 +78,21 @@ func (e *Engine) StartTransfer(session *network.SftpSession, downloadAll bool) e
 			RemotePath: remotePath,
 			Operation:  "DOWNLOAD",
 		})
+		
 		queuedCount++
+		totalBytes += file.Size()
 	}
 
-	fmt.Printf(">> PFTE: Queue filled with %d files.\n", queuedCount)
+	fmt.Printf(">> PFTE: Queue filled. Files: %d, Total Size: %d bytes.\n", queuedCount, totalBytes)
+	
+	GlobalMonitor.Reset(queuedCount, totalBytes)
+
 	if queuedCount == 0 {
-		fmt.Println(">> PFTE: Nothing to download.")
 		return nil
 	}
 
-	// 4. Start the Parallelizer (PLR)
+	// This call was failing because plr.go had errors. 
+	// Now it should work.
 	workerPool := NewWorkerPool(concurrency, e.Queue)
 	workerPool.StartUnleash(session)
 
