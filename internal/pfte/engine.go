@@ -6,7 +6,8 @@ package pfte
 
 import (
 	"fmt"
-	"log"
+	"os"
+	"path/filepath"
 
 	"fileripper/internal/network"
 )
@@ -25,7 +26,7 @@ const (
 
 type Engine struct {
 	Mode  TransferMode
-	Queue *JobQueue // Using our new thread-safe queue
+	Queue *JobQueue 
 }
 
 func NewEngine() *Engine {
@@ -35,55 +36,64 @@ func NewEngine() *Engine {
 	}
 }
 
-// StartTransfer executes the logic.
-// v0.0.3: Test Download and Integrity Check.
-func (e *Engine) StartTransfer(session *network.SftpSession) error {
+// StartTransfer executes the mass download logic.
+func (e *Engine) StartTransfer(session *network.SftpSession, downloadAll bool) error {
 	if session.SftpClient == nil {
 		return fmt.Errorf("sftp_client_not_initialized")
 	}
 
-	batchSize := BatchSizeConservative
+	// 1. Determine Concurrency
+	concurrency := BatchSizeConservative
 	if e.Mode == ModeBoost {
-		batchSize = BatchSizeBoost
+		concurrency = BatchSizeBoost
 	}
-
-	fmt.Printf(">> PFTE Engine started. Workers: %d\n", batchSize)
 	
-	// TEST SCENARIO for v0.0.3:
-	// Try to find 'Server.log' (from your previous output), download it, and check hash.
-	targetFile := "Server.log"
-	localOut := "downloaded_test.log"
-
-	fmt.Printf(">> PFTE: Testing single file workflow on '%s'...\n", targetFile)
-
-	// 1. Queue the job (Simulating real usage)
-	e.Queue.Add(&TransferJob{
-		LocalPath:  localOut,
-		RemotePath: targetFile,
-		Operation:  "DOWNLOAD",
-	})
-
-	// 2. Process Queue (Single threaded for now just to test logic)
-	job := e.Queue.Pop()
-	if job != nil {
-		// Execute Download
-		err := DownloadFile(session, job.RemotePath, job.LocalPath)
-		if err != nil {
-			log.Printf("Download failed: %v", err)
-			return err
-		}
-
-		// 3. Verify Integrity
-		fmt.Println(">> Integrity: Calculating local CRC32 checksum...")
-		hash, err := CalculateChecksum(job.LocalPath)
-		if err != nil {
-			log.Printf("Checksum calculation failed: %v", err)
-			return err
-		}
-		
-		fmt.Printf(">> Integrity: File Hash (CRC32): %s\n", hash)
-		fmt.Println(">> PFTE: Cycle complete. File is safe on disk.")
+	if !downloadAll {
+		fmt.Println(">> PFTE: No operation specified. Use --all to download everything.")
+		return nil
 	}
+
+	// 2. Setup Local Dump Directory
+	localDir := "dump"
+	if _, err := os.Stat(localDir); os.IsNotExist(err) {
+		os.Mkdir(localDir, 0755)
+	}
+
+	// 3. Discovery Phase (Fill the Queue)
+	fmt.Println(">> PFTE: Scanning remote root for mass download...")
+	
+	files, err := session.SftpClient.ReadDir(".")
+	if err != nil {
+		return err
+	}
+
+	queuedCount := 0
+	for _, file := range files {
+		// Skip directories for v0.0.3 (recursion comes later)
+		if file.IsDir() {
+			continue
+		}
+
+		remotePath := file.Name()
+		localPath := filepath.Join(localDir, file.Name())
+
+		e.Queue.Add(&TransferJob{
+			LocalPath:  localPath,
+			RemotePath: remotePath,
+			Operation:  "DOWNLOAD",
+		})
+		queuedCount++
+	}
+
+	fmt.Printf(">> PFTE: Queue filled with %d files.\n", queuedCount)
+	if queuedCount == 0 {
+		fmt.Println(">> PFTE: Nothing to download.")
+		return nil
+	}
+
+	// 4. Start the Parallelizer (PLR)
+	workerPool := NewWorkerPool(concurrency, e.Queue)
+	workerPool.StartUnleash(session)
 
 	return nil
 }
