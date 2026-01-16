@@ -89,14 +89,29 @@ func (e *Engine) StartTransfer(sessions []*network.SftpSession, operation string
 				return nil
 			}
 
-			// Calculate relative path from local base (e.g., "account/meta.xml")
+			// Handle Symlinks: We follow them to keep it simple and functional across OS
+			if info.Mode()&os.ModeSymlink != 0 {
+				resolvedPath, err := filepath.EvalSymlinks(p)
+				if err != nil {
+					fmt.Printf(">> Warning: Could not resolve symlink %s: %v\n", p, err)
+					return nil
+				}
+				info, err = os.Stat(resolvedPath)
+				if err != nil {
+					fmt.Printf(">> Warning: Could not stat resolved symlink %s: %v\n", p, err)
+					return nil
+				}
+				// If it's a directory symlink, we'd need a recursive walk here, 
+				// but for now we handle it as a file or empty dir to avoid loops.
+			}
+
+			// Calculate relative path from local base
 			relPath, err := filepath.Rel(baseDir, p)
 			if err != nil {
 				return err
 			}
 
-			// Join with remote destination (e.g., "/mods/.../[OWL]" + "account/meta.xml")
-			// We use path.Join for SFTP (forward slashes)
+			// Cross-platform path normalization: SFTP always wants forward slashes
 			remoteRel := filepath.ToSlash(relPath)
 			finalRemotePath := path.Join(destPath, remoteRel)
 
@@ -197,7 +212,7 @@ func (e *Engine) startDownload(sessions []*network.SftpSession, mainSession *net
 
 	var info os.FileInfo
 	var err error
-	info, err = mainSession.SftpClient.Lstat(remoteSource)
+	info, err = mainSession.SftpClient.Stat(remoteSource) // Use Stat to follow symlink if the target itself is one
 
 	if err != nil && targetName != "" {
 		fmt.Println(">> Status: Path not found. Initiating Deep Search (Depth: 3)...")
@@ -205,7 +220,7 @@ func (e *Engine) startDownload(sessions []*network.SftpSession, mainSession *net
 		if foundPath != "" {
 			fmt.Printf(">> THE HOUND: Found '%s' at '%s'! Auto-correcting...\n", targetName, foundPath)
 			remoteSource = foundPath
-			info, err = mainSession.SftpClient.Lstat(remoteSource)
+			info, err = mainSession.SftpClient.Stat(remoteSource)
 		} else {
 			return fmt.Errorf("target not found")
 		}
@@ -239,6 +254,16 @@ func (e *Engine) startDownload(sessions []*network.SftpSession, mainSession *net
 
 		if !info.IsDir() && remotePath == remoteSource {
 			localPath = filepath.Join(localBase, rootDirName)
+		}
+
+		if stat.Mode()&os.ModeSymlink != 0 {
+			// If it's a symlink, we try to see what's on the other side
+			realStat, err := mainSession.SftpClient.Stat(remotePath)
+			if err != nil {
+				fmt.Printf(">> Warning: Remote broken symlink %s\n", remotePath)
+				continue
+			}
+			stat = realStat
 		}
 
 		if stat.IsDir() {

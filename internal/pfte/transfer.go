@@ -23,6 +23,7 @@ import (
 	"io"
 	"os"
 	"sync"
+	"time"
 
 	"fileripper/internal/network"
 )
@@ -81,7 +82,15 @@ func DownloadFileWithProgress(session *network.SftpSession, remotePath, localPat
 			}
 
 			_, err = io.CopyBuffer(dst, tracker, buf)
-			return err
+			if err != nil {
+				return err
+			}
+
+			// Preserve mtime if possible
+			if stat, err := session.SftpClient.Stat(remotePath); err == nil {
+				_ = os.Chtimes(localPath, time.Now(), stat.ModTime())
+			}
+			return nil
 		}()
 
 		if lastErr == nil {
@@ -129,6 +138,11 @@ func uploadSingleStream(session *network.SftpSession, localPath, remotePath stri
 			}
 			defer src.Close()
 
+			info, err := src.Stat()
+			if err != nil {
+				return err
+			}
+
 			dst, err := session.SftpClient.Create(remotePath)
 			if err != nil {
 				return err
@@ -144,6 +158,10 @@ func uploadSingleStream(session *network.SftpSession, localPath, remotePath stri
 			if err != nil {
 				return err
 			}
+
+			// Sync timestamps and permissions
+			_ = session.SftpClient.Chtimes(remotePath, time.Now(), info.ModTime())
+			_ = session.SftpClient.Chmod(remotePath, info.Mode())
 
 			_ = fmt.Sprintf("%x", tracker.Hasher.Sum32())
 			return nil
@@ -252,6 +270,12 @@ func uploadMultipart(session *network.SftpSession, localPath, remotePath string,
 	// If any chunk failed, return error so we fall back to single stream
 	if len(errChan) > 0 {
 		return <-errChan
+	}
+
+	// Sync metadata after successful multipart swarm
+	if info, err := os.Stat(localPath); err == nil {
+		_ = session.SftpClient.Chtimes(remotePath, time.Now(), info.ModTime())
+		_ = session.SftpClient.Chmod(remotePath, info.Mode())
 	}
 
 	return nil
